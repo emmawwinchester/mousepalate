@@ -1,0 +1,840 @@
+library(ArchR)
+ArchR::installExtraPackages()
+library(Seurat)
+library(patchwork)
+library(chromVARmotifs)
+library(tidyverse)
+library(ggplot2)
+library(ggsignif)
+library(parallel)
+set.seed(123)
+library('GenomicFeatures')
+library('org.Mm.eg.db')
+addArchRGenome("mm10")
+addArchRThreads(12)
+orgdb<-org.Mm.eg.db
+names<-c('E13.5', 'E15.5')
+files<-paste(names, '_atac_fragments.tsv.gz', sep='')
+
+files2<-createArrowFiles(inputFiles=files, sampleNames=names, minTSS=4, minFrags=1000, threads=1, force=TRUE, subThreading=TRUE, addTileMat=TRUE, addGeneScoreMat=TRUE)
+files2<-list.files(pattern='.arrow')
+doubScores<-addDoubletScores(input=files2, threads=1, force=TRUE)
+
+project<-ArchRProject(ArrowFiles=files2, outputDirectory="palate_initial", copyArrows=TRUE, threads = 12)
+outDir<-getOutputDirectory(project)
+saveArchRProject(project, outputDirectory = outDir)
+
+
+#####now we'll actually integrate the RNA-seq matrix
+project<-filterDoublets(project)
+saveArchRProject(project,  outputDirectory = getOutputDirectory(project), overwrite = TRUE,  load = TRUE)
+
+
+names<-unique(project$Sample)
+files<-paste(names, "_filtered_feature_bc_matrix.h5", sep="")
+seRNA <- import10xFeatureMatrix(input = files, names = names)
+seRNAcombined<-NULL
+for (size in 1:length(seRNA)){
+seRNAcombined<-cbind(seRNAcombined, assay(seRNA[[size]]))
+}
+seRNA2<-SummarizedExperiment(assays=list(counts=seRNAcombined), rowRanges= rowRanges(seRNA[[1]]))
+
+project<-addGeneExpressionMatrix(input=project, seRNA=seRNA2, threads=32)
+
+project <- project[project$TSSEnrichment > 4 & project$nFrags > 2500 & !is.na(project$Gex_nUMI)]
+
+saveArchRProject(project,  outputDirectory = getOutputDirectory(project), overwrite = TRUE,  load = TRUE)
+
+project$bioNames<-1
+project$CellName<-getCellNames(project)
+cells<-getCellNames(project)
+cells1<-cells[grep('E13', cells)]
+thirds<-length(cells1)/3
+cells1<-data.frame(cells1)
+cells1<-cells1[sample(1:nrow(cells1)),]
+cells1a<-cells1[1:thirds]
+cells1<-setdiff(cells1, cells1a)
+cells1b<-cells1[1:thirds]
+cells1c<-setdiff(cells1, cells1b)
+
+project$bioNames[which(project$CellName %in% cells1a)]<-c('E13.5_pseudorep1')
+project$bioNames[which(project$CellName %in% cells1b)]<-c('E13.5_pseudorep2')
+project$bioNames[which(project$CellName %in% cells1c)]<-c('E13.5_pseudorep3')
+
+cells1<-cells[grep('E15', cells)]
+thirds<-length(cells1)/3
+cells1<-data.frame(cells1)
+cells1<-cells1[sample(1:nrow(cells1)),]
+cells1a<-cells1[1:thirds]
+cells1<-setdiff(cells1, cells1a)
+cells1b<-cells1[1:thirds]
+cells1c<-setdiff(cells1, cells1b)
+
+project$bioNames[which(project$CellName %in% cells1a)]<-c('E15.5_pseudorep1')
+project$bioNames[which(project$CellName %in% cells1b)]<-c('E15.5_pseudorep2')
+project$bioNames[which(project$CellName %in% cells1c)]<-c('E15.5_pseudorep3')
+
+outDir<-getOutputDirectory(project)
+
+pdf(file='mouse_palate_initial_RNAQC.pdf', height=8.5, width=11)
+plotGroups(ArchRProj=project, groupBy="Sample", colorBy="cellColData", name="Gex_nUMI", plotAs="ridges")
+plotGroups(ArchRProj=project, groupBy="Sample", colorBy="cellColData", name="Gex_nGenes", PlotAs="ridges")
+plotGroups(ArchRProj=project, groupBy="Sample", colorBy="cellColData", name="Gex_MitoRatio", PlotAs="ridges")
+plotGroups(ArchRProj=project, groupBy="bioNames", colorBy="cellColData", name="Gex_nUMI", PlotAs="ridges")
+plotGroups(ArchRProj=project, groupBy="bioNames", colorBy="cellColData", name="Gex_nGenes", PlotAs="ridges")
+plotGroups(ArchRProj=project, groupBy="bioNames", colorBy="cellColData", name="Gex_MitoRatio", PlotAs="ridges")
+dev.off()
+
+df <- getCellColData(project, select = c("log10(nFrags)", "TSSEnrichment"))
+df
+pdf(file="palate_initial_QC.pdf")
+p <- ggPoint(
+    x = df[,1], 
+    y = df[,2], 
+    colorDensity = TRUE,
+    continuousSet = "sambaNight",
+    xlabel = "Log10 Unique Fragments",
+    ylabel = "TSS Enrichment",
+    xlim = c(log10(500), quantile(df[,1], probs = 0.99)),
+    ylim = c(0, quantile(df[,2], probs = 0.99))
+) + geom_hline(yintercept = 4, lty = "dashed") + geom_vline(xintercept = 3, lty = "dashed")
+
+p
+dev.off()
+
+
+
+saveArchRProject(project, outputDirectory = outDir)
+
+##lets look at these different matrices we've created
+pdf(file="palate_initial_TssEnrichments.pdf", height=8.5, width=11)
+plotGroups(ArchRProj=project, groupBy="Sample", colorBy="cellColData", name="TSSEnrichment", plotAs="ridges")
+plotGroups(ArchRProj=project, groupBy="Sample", colorBy="cellColData", name="log10(nFrags)", PlotAs="ridges")
+plotGroups(ArchRProj=project, groupBy="bioNames", colorBy="cellColData", name="TSSEnrichment", PlotAs="ridges")
+plotGroups(ArchRProj=project, groupBy="bioNames", colorBy="cellColData", name="log10(nFrags)", PlotAs="violin", alpha=0.4, addBoxPlot=TRUE)
+dev.off()
+
+pdf(file='mouse_palate_initial_fragmentsizes.pdf', height=8.5, width=11)
+plotFragmentSizes(ArchRProj = project, groupBy='Sample')
+plotTSSEnrichment(ArchRProj = project, groupBy='Sample')
+plotFragmentSizes(ArchRProj = project, groupBy='bioNames')
+plotTSSEnrichment(ArchRProj = project, groupBy='bioNames')
+dev.off()
+
+
+############now add the RNA umap
+
+project <- addIterativeLSI( ArchRProj = project, clusterParams = list(resolution = 0.2, sampleCells = 10000, n.start = 10), saveIterations = FALSE, useMatrix = "GeneExpressionMatrix", depthCol = "Gex_nUMI", varFeatures = 2500, firstSelection = "variable", binarize = FALSE, name = "LSI_RNA", force=TRUE, threads=1)
+
+
+project<-addIterativeLSI(ArchRProj=project, useMatrix="TileMatrix", name="LSI_ATAC", force=TRUE, iterations=4, clusterParams=list(resolution=0.5, sampleCells=5000, n.start=10), depthCol="nFrags", saveIterations=FALSE, threads=1)
+saveArchRProject(project, outputDirectory = outDir, overwrite = TRUE, load = TRUE)
+
+project <- addCombinedDims(project, reducedDims = c("LSI_ATAC", "LSI_RNA"), name =  "LSI_Combined")
+
+#UMAPs
+project <- addUMAP(project, reducedDims = "LSI_Combined", name = "UMAP_ATAC", minDist = 0.8, force = TRUE)
+project <- addClusters(project, reducedDims = "LSI_Combined", name = "Clusters", resolution = 0.1, force = TRUE)
+
+
+#this step gets rid of cells with no assigned cluster
+clusters<-rownames(table(project$Clusters))
+data<-BiocGenerics::which(project$Clusters %in% clusters)
+data2<-project$cellNames[data]
+project<-subsetCells(ArchRProj = project, cellNames = data2)
+features<-getGenes(project)
+background<-features$symbol
+genes<-as.data.frame(background)
+genes2<-genes$background
+genes2<-gsub("NA_ENSG", "ENSG", genes2)
+
+#now make umap of those clusters
+
+saveArchRProject(project, outputDirectory = outDir, overwrite = TRUE, load = TRUE)
+
+
+pal<- paletteDiscrete(values=unique(project$Sample), set='horizon', reverse=FALSE)
+
+#now lets plot the clusterings
+pdf(file="palate_initial_umap.pdf", height=8.5, width=20)
+p3<-plotEmbedding(ArchRProj=project, colorBy="cellColData", name="Clusters", embedding="UMAP_ATAC")
+p4<-plotEmbedding(ArchRProj = project, colorBy = "cellColData", name = "Sample", embedding = "UMAP_ATAC", pal=pal)
+p5<-plotEmbedding(ArchRProj = project, colorBy = "cellColData", name = "bioNames", embedding = "UMAP_ATAC")
+
+p3 + p4 + p5
+dev.off()
+
+
+pct2<-table(project$Clusters, project$bioNames)
+pct2<-as.data.frame(pct2)
+pct4<-table(project$Clusters, project$Sample)
+pct4<-as.data.frame(pct4)
+
+
+s3a<-ggplot(pct2, aes(x = Var2, y = Freq, fill = Var1)) +
+  theme_bw(base_size = 15) +
+  geom_col(position = "fill", width = 0.5) +
+  xlab("Sample") +  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  ylab("Proportion") +
+  theme(legend.title = element_blank()) + ggtitle('ATAC UMAP')
+s3b<-ggplot(pct2, aes(x = Var1, y = Freq, fill = Var2)) +
+  theme_bw(base_size = 15) +
+  geom_col(position = "fill", width = 0.5) +
+  xlab("Sample") +  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  ylab("Proportion") +
+  theme(legend.title = element_blank()) + ggtitle('ATAC UMAP')
+s5a<-ggplot(pct4, aes(x = Var2, y = Freq, fill = Var1)) +
+  theme_bw(base_size = 15) +
+  geom_col(position = "fill", width = 0.5) +
+  xlab("Sample") +  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  ylab("Proportion") +
+  theme(legend.title = element_blank()) + ggtitle('ATAC UMAP')
+s5b<-ggplot(pct4, aes(x = Var1, y = Freq, fill = Var2)) +
+  theme_bw(base_size = 15) +
+  geom_col(position = "fill", width = 0.5) +
+  xlab("Sample") +  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  ylab("Proportion") +
+  theme(legend.title = element_blank()) + ggtitle('ATAC UMAP')
+
+atac<-(s3a + s3b)/(s5a+s5b)
+
+
+pdf(file="palate_initial_umap_clusterbreakdown.pdf", height=18, width=12)
+(p3 + p4) / (s5a + s5b) + plot_annotation("ATAC UMAP Cluster Breakdown-Sample")
+(p3 + p5) / (s3a + s3b) + plot_annotation("ATAC UMAP Cluster Breakdown-Stages")
+dev.off()
+
+
+
+project$orig.clusters<-project$Clusters
+
+xxy<-unique(project$Clusters)
+markersPeaks2<-getMarkerFeatures(ArchRProj=project, useMatrix="GeneExpressionMatrix", groupBy="Clusters", bias=c('Gex_nUMI', 'log10(nFrags)'), testMethod="wilcoxon", threads=1)
+markerList <- getMarkers(markersPeaks2, cutOff = "FDR <= 0.05 & Log2FC >= 0.75")
+
+load(file='~/cotney/one2one_ortho.Rdata') #stored as genesV2
+library(bedr)
+xxy<-unique(project$Clusters)
+universe<-getFeatures(project, useMatrix='GeneExpressionMatrix')
+library(ggplot2)
+library(rGREAT)
+library(DOSE)
+library(multienrichjam)
+library(clusterProfiler)
+set.seed(123)
+data3<-NULL
+for (clustername in xxy){
+data<-BiocGenerics::which(project$Clusters %in% clustername)
+data2<-project$cellNames[data]
+data<-as.data.frame(data2)
+df <- markerList[[clustername]]
+df<-df[order(-df$Log2FC),5]
+value_bp <- enrichGO(gene = df, universe = universe, OrgDb = 'org.Mm.eg.db', keyType = 'SYMBOL', readable = F, ont = "BP", pvalueCutoff = 0.05, pAdjustMethod = "bonferroni")
+GO3<-simplify(value_bp, cutoff=0.75, by="qvalue")[]
+data$GO_Genes<-paste(GO3[1,2], GO3[2,2], GO3[3,2], sep=',')
+data$HighestMarker<-df[1]
+data3<-rbind(data3, data)
+}
+colnames(data3)<-c("Cells", "GO_Genes", "HighestMarker")
+cells<-data3$Cells
+data2<-project$cellNames[cells]
+project<-addCellColData(ArchRProj=project, data=data3$GO_Genes, cells=as.vector(data3$Cells), name="MarkerGenes_GO", force=TRUE)
+project<-addCellColData(ArchRProj=project, data=data3$HighestMarker, cells=as.vector(data3$Cells), name="HighestMarker", force=TRUE)
+saveArchRProject(project)
+
+#####################lets visualize all of this nonsense
+p3<-plotEmbedding(ArchRProj=project, colorBy="cellColData", name="Clusters", embedding="UMAP_ATAC")+ theme(text = element_text(size=20), aspect.ratio=1)
+p4<-plotEmbedding(ArchRProj = project, colorBy = "cellColData", name = "Sample", embedding = "UMAP_ATAC")+ theme(text = element_text(size=20), aspect.ratio=1)
+p5<-plotEmbedding(ArchRProj = project, colorBy = "cellColData", name = "bioNames", embedding = "UMAP_ATAC")+ theme(text = element_text(size=20), aspect.ratio=1)
+m1<-plotEmbedding(ArchRProj = project, colorBy = "cellColData", name = "HighestMarker", embedding = "UMAP_ATAC") + theme(text = element_text(size=120), aspect.ratio=1)
+p10<-plotEmbedding(ArchRProj = project, colorBy = "cellColData", name = "MarkerGenes_GO", embedding = "UMAP_ATAC") + theme(text = element_text(size=120), aspect.ratio=1)
+
+pct4<-table(project$Clusters, project$Sample)
+pct4<-as.data.frame(pct4)
+s4a<-ggplot(pct4, aes(x = Var2, y = Freq, fill = Var1)) + theme_bw(base_size = 15) + geom_col(position = "fill", width = 0.5) + xlab("Sample") +  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +  ylab("Proportion") + theme(text = element_text(size=20), aspect.ratio=1)+ theme(legend.title = element_blank()) + ggtitle('ATAC UMAP')
+s4b<-ggplot(pct4, aes(x = Var1, y = Freq, fill = Var2)) + theme_bw(base_size = 15) + geom_col(position = "fill", width = 0.5) + xlab("Sample") +  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +  ylab("Proportion") + theme(text = element_text(size=20), aspect.ratio=1)+ theme(legend.title = element_blank()) + ggtitle('ATAC UMAP')
+
+pdf(file="mouse_allcf_allcelltypes_umap.pdf", height=25, width=25)
+(p3 + p4 + p5)/(m1 + p10)
+(p3|p4)/(s4a + s4b) + plot_annotation("UMAP Cluster Breakdown by Sample")
+dev.off()
+
+###############now assess marker genes
+project<-addImputeWeights(project, reducedDims="LSI_Combined", threads=1)
+saveArchRProject(project, outputDirectory =getOutputDirectory(project), overwrite = TRUE, load = TRUE)
+sexgenes<-c('Xist', 'Sry')
+pdf(file="palate_initial_sexmarkergene_umap.pdf", height=8.5, width=11.5)
+for (file in sexgenes){
+e1<-plotEmbedding(ArchRProj=project, colorBy="GeneExpressionMatrix", name=file, embedding="UMAP_ATAC", quantCut=c(0.01, 0.95), imputeWeights=getImputeWeights(project))
+f1<-plotGroups(ArchRProj=project, groupBy="Clusters", colorBy="GeneExpressionMatrix", name=file, PlotAs="ridges")
+print(p3 + e1 + f1)
+}
+dev.off()
+
+standardmarkers<-c('EPCAM', 'MYOG', 'SOX10', 'HEMGN', 'FCER1G', 'CDH5', 'SOX2', 'MSX1')
+load(file='/home/FCAM/ewentworth/cotney/one2one_ortho.Rdata') #stored as genesV2
+standardmarkers<-genesV2[which(genesV2$HGNC.symbol %in% standardmarkers),2]
+standardmarkers<-intersect(standardmarkers, getFeatures(project))
+
+pdf(file="palate_initial_standardmarkers_umap.pdf", height=25, width=15)
+p <- plotEmbedding(ArchRProj = project, colorBy = "GeneExpressionMatrix", name = standardmarkers, embedding = "UMAP_ATAC", quantCut = c(0.01, 0.95), imputeWeights = getImputeWeights(project), threads=1)
+p2 <- lapply(p, function(x){
+    x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(axis.text.x=element_blank(), axis.ticks.x=element_blank(), axis.text.y=element_blank(), axis.ticks.y=element_blank())
+})
+do.call(cowplot::plot_grid, c(list(ncol = 3),p2))
+p <- plotGroups(ArchRProj = project, groupBy='Clusters', colorBy='GeneExpressionMatrix', name = standardmarkers, imputeWeights = getImputeWeights(project), PlotAs='ridges', threads=1)
+p2 <- lapply(p, function(x){
+    x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(axis.text.x=element_blank(), axis.ticks.x=element_blank(), axis.text.y=element_blank(), axis.ticks.y=element_blank())
+})
+do.call(cowplot::plot_grid, c(list(ncol = 3),p2))
+dev.off()
+
+
+
+########################rename clusters based on all this information. 
+project<-loadArchRProject('palate_initial')
+
+project$Clusters_details<-project$Clusters
+labelOld<-sort(unique(project$Clusters))
+#1, 10, 2, 3, 4, 5, 6, 7, 8, 9
+labelNew2<-c('Neural Cells', 'Mesenchyme', 'Endothelium', 'Blood Cells', 'Muscle Cells', 'Neural Cells', 'Mesenchyme', 'Neural Cells', 'Epithelium', 'Mesenchyme')
+project$Clusters_general <- mapLabels(project$Clusters, newLabels = labelNew2, oldLabels = labelOld)
+saveArchRProject(project)
+saveArchRProject(project,  outputDirectory = 'general_celltypes', overwrite = TRUE,  load = TRUE)
+
+
+##################3mesenchyme subclustering
+
+project<-subsetArchRProject(project, cells = (getCellNames(project)[which(project$Clusters %in% c("Mesenchyme"))]), outputDirectory = 'mesenchyme', dropCells = FALSE, logFile = NULL, threads = 1, force = TRUE)
+project <- addIterativeLSI( ArchRProj = project, clusterParams = list(resolution = 0.2, sampleCells = 10000, n.start = 10), saveIterations = TRUE, useMatrix = "GeneExpressionMatrix", depthCol = "Gex_nUMI", varFeatures = 2500, firstSelection = "variable", binarize = FALSE, name = "LSI_RNA", force=TRUE, threads=1)
+
+project<-addIterativeLSI(project, useMatrix="TileMatrix", name="LSI_ATAC", force=TRUE, iterations=4, clusterParams=list(resolution=0.5, sampleCells=5000, n.start=10), depthCol="nFrags", saveIterations=FALSE, threads=32)
+project <- addCombinedDims(project, reducedDims = c("LSI_ATAC", "LSI_RNA"), name = "LSI_Combined")
+
+project <- addUMAP(project, reducedDims = "LSI_Combined", name = "UMAP_ATAC", minDist = 0.8, force = TRUE)
+project <- addClusters(project, reducedDims = "LSI_Combined", name = "Clusters", resolution = 0.25, force = TRUE)
+#this step gets rid of cells with no assigned cluster
+clusters<-rownames(table(project$Clusters))
+data<-BiocGenerics::which(project$Clusters %in% clusters)
+data2<-project$cellNames[data]
+project<-subsetCells(ArchRProj = project, cellNames = data2)
+features<-getGenes(project)
+background<-features$symbol
+genes<-as.data.frame(background)
+genes2<-genes$background
+genes2<-gsub("NA_ENSG", "ENSG", genes2)
+
+saveArchRProject(project)
+
+pal<- paletteDiscrete(values=unique(project$Sample), set='horizon', reverse=FALSE)
+
+p3<-plotEmbedding(ArchRProj=project, colorBy="cellColData", name="Clusters", embedding="UMAP_ATAC")
+p4<-plotEmbedding(ArchRProj = project, colorBy = "cellColData", name = "Sample", embedding = "UMAP_ATAC", pal=pal)
+p5<-plotEmbedding(ArchRProj = project, colorBy = "cellColData", name = "bioNames", embedding = "UMAP_ATAC")
+
+pct2<-table(project$Clusters, project$bioNames)
+pct2<-as.data.frame(pct2)
+pct4<-table(project$Clusters, project$Sample)
+pct4<-as.data.frame(pct4)
+
+
+s3a<-ggplot(pct2, aes(x = Var2, y = Freq, fill = Var1)) +
+  theme_bw(base_size = 15) +
+  geom_col(position = "fill", width = 0.5) +
+  xlab("Sample") +  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  ylab("Proportion") +
+  theme(legend.title = element_blank()) + ggtitle('ATAC UMAP')
+s3b<-ggplot(pct2, aes(x = Var1, y = Freq, fill = Var2)) +
+  theme_bw(base_size = 15) +
+  geom_col(position = "fill", width = 0.5) +
+  xlab("Sample") +  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  ylab("Proportion") +
+  theme(legend.title = element_blank()) + ggtitle('ATAC UMAP')
+s5a<-ggplot(pct4, aes(x = Var2, y = Freq, fill = Var1)) +
+  theme_bw(base_size = 15) +
+  geom_col(position = "fill", width = 0.5) +
+  xlab("Sample") +  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  ylab("Proportion") +
+  theme(legend.title = element_blank()) + ggtitle('ATAC UMAP')
+s5b<-ggplot(pct4, aes(x = Var1, y = Freq, fill = Var2)) +
+  theme_bw(base_size = 15) +
+  geom_col(position = "fill", width = 0.5) +
+  xlab("Sample") +  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  ylab("Proportion") +
+  theme(legend.title = element_blank()) + ggtitle('ATAC UMAP')
+
+atac<-(s3a + s3b)/(s5a+s5b)
+
+
+pdf(file="mesenchyme_umap_clusterbreakdown.pdf", height=18, width=12)
+(p3 + p4) / (s5a + s5b) + plot_annotation("ATAC UMAP Cluster Breakdown-Sample")
+(p3 + p5) / (s3a + s3b) + plot_annotation("ATAC UMAP Cluster Breakdown-Stages")
+dev.off()
+
+
+universe<-getFeatures(project)
+markersPeaks2<-getMarkerFeatures(ArchRProj=project, useMatrix="GeneExpressionMatrix", groupBy="Clusters", threads=16)
+markerList2 <- getMarkers(markersPeaks2, cutOff = "FDR <= 0.05 & Log2FC >= 3")
+
+
+heatmapGS <- markerHeatmap(seMarker = markersPeaks2, cutOff = "FDR <= 0.01 & Log2FC >= 0.5", transpose = TRUE)
+pdf(file="mesenchyme_standardmarkers_heatmap.pdf", height=25, width=15)
+ComplexHeatmap::draw(heatmapGS, heatmap_legend_side = "bot", annotation_legend_side = "bot")
+dev.off()
+
+xxy<-unique(project$Clusters)
+
+
+
+pal<- paletteDiscrete(values=unique(project$Sample), set='horizon', reverse=FALSE)
+
+load(file='~/cotney/one2one_ortho.Rdata') #stored as genesV2
+library(bedr)
+xxy<-unique(project$Clusters)
+universe<-getFeatures(project)
+library(ggplot2)
+library(rGREAT)
+library(DOSE)
+library(multienrichjam)
+library(clusterProfiler)
+set.seed(123)
+data3<-NULL
+for (clustername in xxy){
+data<-BiocGenerics::which(project$Clusters %in% clustername)
+data2<-project$cellNames[data]
+data<-as.data.frame(data2)
+df <- markerList2[[clustername]]
+df<-df[order(-df$Log2FC),5]
+value_bp <- enrichGO(gene = df, universe = universe, OrgDb = 'org.Mm.eg.db', keyType = 'SYMBOL', readable = F, ont = "BP", pvalueCutoff = 0.05, pAdjustMethod = "bonferroni")
+GO3<-simplify(value_bp, cutoff=0.75, by="qvalue")[]
+data$GO_Genes<-paste(GO3[1,2], GO3[2,2], GO3[3,2], sep=',')
+data$HighestMarker<-df[1]
+data3<-rbind(data3, data)
+}
+colnames(data3)<-c("Cells", "GO_Genes", "HighestMarker")
+cells<-data3$Cells
+data2<-project$cellNames[cells]
+project<-addCellColData(ArchRProj=project, data=data3$GO_Genes, cells=as.vector(data3$Cells), name="MarkerGenes_GO", force=TRUE)
+project<-addCellColData(ArchRProj=project, data=data3$HighestMarker, cells=as.vector(data3$Cells), name="HighestMarker", force=TRUE)
+saveArchRProject(project)
+
+
+#####################lets visualize all of this nonsense
+p3<-plotEmbedding(ArchRProj=project, colorBy="cellColData", name="Clusters", embedding="UMAP_ATAC")+ theme(text = element_text(size=20), aspect.ratio=1)
+p4<-plotEmbedding(ArchRProj = project, colorBy = "cellColData", name = "Sample", embedding = "UMAP_ATAC")+ theme(text = element_text(size=20), aspect.ratio=1)
+p5<-plotEmbedding(ArchRProj = project, colorBy = "cellColData", name = "bioNames", embedding = "UMAP_ATAC")+ theme(text = element_text(size=20), aspect.ratio=1)
+m1<-plotEmbedding(ArchRProj = project, colorBy = "cellColData", name = "HighestMarker", embedding = "UMAP_ATAC") + theme(text = element_text(size=120), aspect.ratio=1)
+p9<-plotEmbedding(ArchRProj = project, colorBy = "cellColData", name = "MarkerGenes_GO", embedding = "UMAP_ATAC")+ theme(text = element_text(size=120), aspect.ratio=1)
+
+pct4<-table(project$Clusters, project$Sample)
+pct4<-as.data.frame(pct4)
+s4a<-ggplot(pct4, aes(x = Var2, y = Freq, fill = Var1)) + theme_bw(base_size = 15) + geom_col(position = "fill", width = 0.5) + xlab("Sample") +  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +  ylab("Proportion") + theme(text = element_text(size=20), aspect.ratio=1)+ theme(legend.title = element_blank()) + ggtitle('ATAC UMAP')
+s4b<-ggplot(pct4, aes(x = Var1, y = Freq, fill = Var2)) + theme_bw(base_size = 15) + geom_col(position = "fill", width = 0.5) + xlab("Sample") +  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +  ylab("Proportion") + theme(text = element_text(size=20), aspect.ratio=1)+ theme(legend.title = element_blank()) + ggtitle('ATAC UMAP')
+
+pdf(file="mesenchyme_umap.pdf", height=15, width=15)
+(p3 + p4 + p5)/(m1 + p9)
+(p3|p4)/(s4a + s4b) + plot_annotation("UMAP Cluster Breakdown by Sample")
+dev.off()
+
+
+project<-addImputeWeights(project, reducedDims="LSI_Combined", threads=1)
+saveArchRProject(project, outputDirectory =getOutputDirectory(project), overwrite = TRUE, load = TRUE)
+
+osteo<-c('Sparc', 'Runx2', 'Col1a1', 'Alpl', 'Sp7')
+mpcs<-c('Tbx22', 'Wnt16', 'Meis2', 'Six2', 'Tfap2b')
+chondro<-c('Col2a1', 'Col9a2', 'Col9a3', 'Col11a1')
+perimys<-c('Rbp1', 'Igfbp5', 'Igfbp3', 'Col12a1', 'Tbx15')
+fibro<-c('Igf1', 'Fbn2', 'Prkg1', 'Col5a1', 'Col23a1')
+
+list<-c('osteo', 'mpcs', 'chondro', 'perimys', 'fibro')
+pdf(file='mesenchyme_markers.pdf', height=15, width=10)
+for (filename in list){
+e1<-plotEmbedding(ArchRProj=project, colorBy="GeneExpressionMatrix", name=get(filename), embedding="UMAP_ATAC", quantCut=c(0.01, 0.95), imputeWeights=getImputeWeights(project))
+f1<-plotGroups(ArchRProj=project, groupBy="Clusters", colorBy="GeneExpressionMatrix", name=get(filename), PlotAs="ridges")
+print(p3 + e1 + f1 + ggtitle(filename))
+}
+dev.off()
+
+project$Clusters_old<-project$Clusters
+labelOld<-sort(unique(project$Clusters))
+#1, 2, 3, 4, 5, 6, 7, 8
+labelNew2<-c('Osteogenic Cells', 'Chondrogenic Cells', 'Mesenchyme', 'Pax9 Mesenchyme', 'Mesenchyme', 'Mesenchyme', 'Mesenchyme', 'Mesenchyme')
+project$Clusters <- mapLabels(project$Clusters, newLabels = labelNew2, oldLabels = labelOld)
+pal<- paletteDiscrete(values=unique(project$Sample), set='horizon', reverse=FALSE)
+pathToMacs2 <- findMacs2()
+project<-addGroupCoverages(ArchRProj=project, groupBy="Clusters", threads=1, force=TRUE)
+saveArchRProject(project,  outputDirectory = getOutputDirectory(project), overwrite = TRUE,  load = TRUE)
+
+project<-addReproduciblePeakSet(ArchRProj=project, groupBy="Clusters", cutoff=0.05, pathToMacs2=pathToMacs2, threads=1, force=TRUE, maxPeaks=150000, promoterRegion = c(2500, 2500), reproducibility='2')
+saveArchRProject(project,  outputDirectory = getOutputDirectory(project), overwrite = TRUE,  load = TRUE)
+
+getPeakSet(project)
+project<-addPeakMatrix(project, threads=16, force=TRUE)
+saveArchRProject(project)
+library(JASPAR2020)
+test<-TFBSTools::getMatrixSet(JASPAR2020,opts=list(all_versions=c(FALSE), collection=c('CORE'), tax_group=c('vertebrates'), matrixtype=c('PWM')))
+#now make sure the names of the PWM slots are the TF names, not just the random ass identifiers
+S4_to_dataframe <- function(s4obj) {
+  nms <- slotNames(s4obj)[3]
+
+  lst <- lapply(nms, function(nm) slot(s4obj, nm))
+  as.data.frame(setNames(lst, nms))
+}
+
+flw<-vector("list", length(test))
+for (filename in 1:length(test)){
+symbol<-S4_to_dataframe(test[[filename]])
+symbol<-unique(symbol$name)
+print(filename)
+print(symbol)
+names(test)[[filename]]<-symbol
+test[[filename]]@ID<-symbol
+}
+project <- addMotifAnnotations(ArchRProj = project, motifPWMs=test, name = "Motif", force=TRUE, threads=16)
+project <- addBgdPeaks(project)
+project <- addDeviationsMatrix( ArchRProj = project, peakAnnotation = "Motif", force = TRUE, threads=32)
+saveArchRProject(project)
+
+markersPeaks<-getMarkerFeatures(ArchRProj=project, useMatrix="PeakMatrix", groupBy="Clusters", bias=c('TSSEnrichment', 'log10(nFrags)'), testMethod="wilcoxon", threads=1)
+markerList <- getMarkers(markersPeaks, cutOff = "FDR <= 0.05 & Log2FC >= 1.0")
+
+motifsUp <- peakAnnoEnrichment(seMarker = markersPeaks, ArchRProj = project, peakAnnotation = "Motif", cutOff = "FDR <= 0.05 & Log2FC >= 0.25")
+heatmapEM <- plotEnrichHeatmap(motifsUp, n = 15, transpose = TRUE)
+pdf(file='mesenchyme_motif_enrichment_annotated_clusters.pdf', height=15, width=15)
+heatmapEM
+dev.off()
+
+markergenes<-getMarkerFeatures(ArchRProj=project, useMatrix="GeneExpressionMatrix", groupBy="Clusters", testMethod="wilcoxon", threads=1)
+markerList2 <- getMarkers(markergenes, cutOff = "FDR <= 0.05 & Log2FC >= 0.5")
+universe<-getFeatures(project)
+background<-read.table(file='/home/FCAM/ewentworth/cotney/rawdata/chromatinsegmentations/mouse_18state/tissue_specific_enhancer_analysis/all_enhancers_all_samples.bed')
+colnames(background)[1:3]<-c('chr', 'start', 'end')
+background<-bedr(input=list(i=background), method='sort')
+background<-bedr(input=list(i=background), method='merge')
+xxy<-unique(project$Clusters)
+
+
+pal<- paletteDiscrete(values=unique(project$Sample), set='horizon', reverse=FALSE)
+
+load(file='~/cotney/one2one_ortho.Rdata') #stored as genesV2
+library(bedr)
+xxy<-unique(project$Clusters)
+universe<-getFeatures(project)
+library(ggplot2)
+library(rGREAT)
+library(DOSE)
+library(multienrichjam)
+library(clusterProfiler)
+set.seed(123)
+data3<-NULL
+for (clustername in xxy){
+data<-BiocGenerics::which(project$Clusters %in% clustername)
+data2<-project$cellNames[data]
+data<-as.data.frame(data2)
+df <- markerList2[[clustername]]
+df<-df[grep('^Gm|Rik|LINC|LOC|^Rp|^Olf', df[,5], ignore.case=TRUE, invert=TRUE),]
+df<-df[order(-df$Log2FC),5]
+value_bp <- enrichGO(gene = df, universe = universe, OrgDb = 'org.Mm.eg.db', keyType = 'SYMBOL', readable = F, ont = "BP", pvalueCutoff = 0.05, pAdjustMethod = "bonferroni")
+GO3<-simplify(value_bp, cutoff=0.75, by="qvalue")[]
+data$GO_Genes<-paste(GO3[1,2], GO3[2,2], GO3[3,2], sep=',')
+data$HighestMarker<-df[1]
+data3<-rbind(data3, data)
+}
+colnames(data3)<-c("Cells", "GO_Genes", "HighestMarker")
+cells<-data3$Cells
+data2<-project$cellNames[cells]
+project<-addCellColData(ArchRProj=project, data=data3$GO_Genes, cells=as.vector(data3$Cells), name="MarkerGenes_GO", force=TRUE)
+project<-addCellColData(ArchRProj=project, data=data3$HighestMarker, cells=as.vector(data3$Cells), name="HighestMarker", force=TRUE)
+saveArchRProject(project)
+
+
+p3<-plotEmbedding(ArchRProj=project, colorBy="cellColData", name="Clusters", embedding="UMAP_ATAC")+ theme(text = element_text(size=20), aspect.ratio=1)
+p4<-plotEmbedding(ArchRProj = project, colorBy = "cellColData", name = "Sample", embedding = "UMAP_ATAC")+ theme(text = element_text(size=20), aspect.ratio=1)
+p5<-plotEmbedding(ArchRProj = project, colorBy = "cellColData", name = "bioNames", embedding = "UMAP_ATAC")+ theme(text = element_text(size=20), aspect.ratio=1)
+m1<-plotEmbedding(ArchRProj = project, colorBy = "cellColData", name = "HighestMarker", embedding = "UMAP_ATAC") + theme(text = element_text(size=120), aspect.ratio=1)
+p9<-plotEmbedding(ArchRProj = project, colorBy = "cellColData", name = "MarkerGenes_GO", embedding = "UMAP_ATAC")+ theme(text = element_text(size=120), aspect.ratio=1)
+p10<-plotEmbedding(ArchRProj = project, colorBy = "GeneExpressionMatrix", name = "Pax9", embedding = "UMAP_ATAC")+ theme(text = element_text(size=120), aspect.ratio=1)
+p11<-plotEmbedding(ArchRProj = project, colorBy = "MotifMatrix", name = "z:PAX9", embedding = "UMAP_ATAC")+ theme(text = element_text(size=120), aspect.ratio=1)
+f1<-plotGroups(ArchRProj=project, groupBy="Clusters", colorBy="GeneExpressionMatrix", name='Pax9', PlotAs="ridges")
+f2<-plotGroups(ArchRProj=project, groupBy="Clusters", colorBy="MotifMatrix", name='z:PAX9', PlotAs="ridges")
+
+pct4<-table(project$Clusters, project$bioNames)
+pct4<-as.data.frame(pct4)
+s4a<-ggplot(pct4, aes(x = Var2, y = Freq, fill = Var1)) + theme_bw(base_size = 15) + geom_col(position = "fill", width = 0.5) + xlab("pseudoreplicate") +  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +  ylab("Proportion") + theme(text = element_text(size=20), aspect.ratio=1)+ theme(legend.title = element_blank()) + ggtitle('ATAC UMAP')
+s4b<-ggplot(pct4, aes(x = Var1, y = Freq, fill = Var2)) + theme_bw(base_size = 15) + geom_col(position = "fill", width = 0.5) + xlab("pseudoreplicate") +  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +  ylab("Proportion") + theme(text = element_text(size=20), aspect.ratio=1)+ theme(legend.title = element_blank()) + ggtitle('ATAC UMAP')
+
+pdf(file="mesenchyme_umap_annotated.pdf", height=15, width=15)
+(p3 / p4)/(p5)
+(m1 / p9)
+(p10+p11)/(f1+f2)
+(p3|p4)/(s4a + s4b) + plot_annotation("UMAP Cluster Breakdown by Pseudoreplicate")
+dev.off()
+
+moremarkers1<-c('Sost', 'Dkk1', 'Dkk2', 'Wnt3', 'Axin2', 'Lrp5', 'Lrp6', 'Sfrp1', 'Sfrp2', 'Sfrp3', 'Lef1', 'Fzd9', 'Tcf1', 'Gsk3b', 'Wnt10b', 'Ctnnb1', 'Wnt5b', 'Wnt5a', 'Wnt1', 'Twist1', 'Twist2')
+moremarkers<-intersect(moremarkers1, getFeatures(project, useMatrix='GeneExpressionMatrix'))
+p3<-plotEmbedding(ArchRProj=project, colorBy="cellColData", name="Clusters", embedding="UMAP_ATAC")+ theme(text = element_text(size=20), aspect.ratio=1)
+project<-addImputeWeights(project, reducedDims='LSI_Combined')
+pdf(file='mesenchyme_extra_markers.pdf', height=15, width=10)
+for (filename in moremarkers){
+f1<-plotGroups(ArchRProj=project, groupBy="Clusters", colorBy="GeneExpressionMatrix", name=filename, PlotAs="ridges", imputeWeights=getImputeWeights(project))
+print(p3 + f1 + ggtitle(filename))
+}
+dev.off()
+
+
+
+
+trajectory<-c('Pax9 Mesenchyme', 'Osteogenic Cells')
+project <- addTrajectory( ArchRProj = project, name = "mesenchyme", groupBy = "Clusters", trajectory = trajectory, embedding = "UMAP_ATAC", force = TRUE)
+p <- plotTrajectory(project, trajectory = "mesenchyme", colorBy = "cellColData", name = "mesenchyme", embedding='UMAP_ATAC')
+p1 <- plotTrajectory(project, trajectory = "mesenchyme", colorBy = "GeneExpressionMatrix", name = "Pax9", continuousSet = "whiteRed", embedding='UMAP_ATAC')
+p2 <- plotTrajectory(project, trajectory = "mesenchyme", colorBy = "GeneExpressionMatrix", name = "Twist1", continuousSet = "whiteRed", embedding='UMAP_ATAC')
+p3 <- plotTrajectory(project, trajectory = "mesenchyme", colorBy = "GeneExpressionMatrix", name = "Twist2", continuousSet = "whiteRed", embedding='UMAP_ATAC')
+p4<-plotEmbedding(ArchRProj=project, colorBy="cellColData", name="Clusters", embedding="UMAP_ATAC")+ theme(text = element_text(size=20), aspect.ratio=1)
+p5<-plotEmbedding(ArchRProj=project, colorBy="cellColData", name="bioNames", embedding="UMAP_ATAC")+ theme(text = element_text(size=20), aspect.ratio=1)
+p11 <- plotTrajectory(project, trajectory = "mesenchyme", colorBy = "MotifMatrix", name = "z:PAX9", continuousSet = "whiteBlue", embedding='UMAP_ATAC')
+p21 <- plotTrajectory(project, trajectory = "mesenchyme", colorBy = "MotifMatrix", name = "z:TWIST1", continuousSet = "whiteBlue", embedding='UMAP_ATAC')
+p31 <- plotTrajectory(project, trajectory = "mesenchyme", colorBy = "MotifMatrix", name = "z:TWIST2", continuousSet = "whiteBlue", embedding='UMAP_ATAC')
+pdf(file='mouse_mesenchyme_trajectory.pdf', height=8.5, width=11)
+(p4|p[[1]])/(p1[[1]]|p2[[1]]|p3[[1]])
+p1[[1]]|p2[[1]]|p3[[1]]
+p11[[1]]|p21[[1]]|p31[[1]]
+dev.off()
+
+trajMM  <- getTrajectory(ArchRProj = project, name = "mesenchyme", useMatrix = "MotifMatrix", log2Norm = FALSE, scaleTo=NULL, groupEvery=5)
+trajGEM  <- getTrajectory(ArchRProj = project, name = "mesenchyme", useMatrix = "GeneExpressionMatrix", log2Norm = TRUE, groupEvery=5)
+trajGSM  <- getTrajectory(ArchRProj = project, name = "mesenchyme", useMatrix = "GeneExpressionMatrix", log2Norm = TRUE, groupEvery=5)
+
+
+pdf(file='mesenchyme_trajectory_heatmap.pdf', height=8.5, width=11)
+plotTrajectoryHeatmap(trajMM, varCutOff = 0.75, pal = paletteContinuous(set = "solarExtra"))
+plotTrajectoryHeatmap(trajGEM, varCutOff = 0.75, grepExclude=c('Gm|Rik'), pal = paletteContinuous(set = "solarExtra"))
+plotTrajectoryHeatmap(trajGSM, varCutOff = 0.75, grepExclude=c('Gm|Rik'), pal = paletteContinuous(set = "solarExtra"))
+dev.off()
+
+library(stringr)
+trajMM<-trajMM[grep('var|deviations', rownames(trajMM), invert=TRUE, ignore.case=TRUE),]
+rownames(trajMM)<-paste0('z:', str_to_upper(gsub('deviations:|z:', '', rownames(trajMM)), locale = "en"))
+rownames(trajGEM)<-str_to_upper(rownames(trajGEM), locale = "en")
+corGSM_MM <- correlateTrajectories(trajGEM, trajMM, corCutOff=0.15, varCutOff1=0.15, varCutOff2=0.15)
+corGSM_MM[[1]]$name1<-str_to_upper(corGSM_MM[[1]]$name1, locale = "en")
+corGSM_MM[[1]]$name2<-paste0('z:', str_to_upper(gsub('deviations:|z:', '', corGSM_MM[[1]]$name2), locale = "en"))
+trajGSM2 <- trajGEM[which(rownames(trajGEM) %in% corGSM_MM[[1]]$name1), ]
+trajMM2 <- trajMM[which(rownames(trajMM) %in% gsub('.*:', 'z:', rownames(trajGSM2))), ]
+trajCombined <- trajGSM2
+assay(trajCombined, withDimnames=FALSE) <- t(apply(assay(trajGSM2), 1, scale)) + t(apply(assay(trajMM2), 1, scale))
+combinedMat <- plotTrajectoryHeatmap(trajCombined, returnMat = TRUE, varCutOff = 0)
+rowOrder <- match(unique(rownames(combinedMat)), rownames(trajGSM2))
+ht1 <- plotTrajectoryHeatmap(trajGSM2,  pal = paletteContinuous(set = "whiteRed"),  varCutOff = 0.25, rowOrder = rowOrder)
+ht2 <- plotTrajectoryHeatmap(trajMM2, pal = paletteContinuous(set = "whiteBlue"), varCutOff = 0.25, rowOrder = rowOrder)
+pdf(file='mousecf_mesenchyme_trajectory_motif_geneexpression_correlation_heatmap.pdf', height=8.5, width=11)
+ht1 + ht2
+plotTrajectoryHeatmap(trajCombined, returnMat = FALSE, varCutOff = 0)
+dev.off()
+
+
+saveArchRProject(project)
+
+project<-loadArchRProject('general_celltypes')
+project$Clusters_general<-project$Clusters
+mes<-loadArchRProject('mesenchyme')
+xxy<-unique(mes$Clusters)
+data2<-NULL
+for (clustername in xxy){
+data2<-mes$cellNames[which(mes$Clusters %in% clustername)]
+project$Clusters[which(project$cellNames %in% data2)]<-clustername
+}
+saveArchRProject(project, outputDirectory ='detailed_celltypes', threads=1, overwrite = TRUE,  load = TRUE)
+project<-loadArchRProject('detailed_celltypes')
+pathToMacs2 <- findMacs2()
+project<-addGroupCoverages(ArchRProj=project, groupBy="Clusters", threads=1, force=TRUE)
+saveArchRProject(project,  outputDirectory = getOutputDirectory(project), overwrite = TRUE,  load = TRUE)
+project<-addReproduciblePeakSet(ArchRProj=project, groupBy="Clusters", cutoff=0.1, pathToMacs2=pathToMacs2, threads=1, force=TRUE, maxPeaks=150000, promoterRegion = c(2500, 2500), reproducibility='1')
+saveArchRProject(project,  outputDirectory = getOutputDirectory(project), overwrite = TRUE,  load = TRUE)
+
+getPeakSet(project)
+project<-addPeakMatrix(project, threads=16, force=TRUE)
+saveArchRProject(project)
+library(JASPAR2020)
+test<-TFBSTools::getMatrixSet(JASPAR2020,opts=list(all_versions=c(FALSE), collection=c('CORE'), tax_group=c('vertebrates'), matrixtype=c('PWM')))
+#now make sure the names of the PWM slots are the TF names, not just the random ass identifiers
+S4_to_dataframe <- function(s4obj) {
+  nms <- slotNames(s4obj)[3]
+
+  lst <- lapply(nms, function(nm) slot(s4obj, nm))
+  as.data.frame(setNames(lst, nms))
+}
+
+flw<-vector("list", length(test))
+for (filename in 1:length(test)){
+symbol<-S4_to_dataframe(test[[filename]])
+symbol<-unique(symbol$name)
+print(filename)
+print(symbol)
+names(test)[[filename]]<-symbol
+test[[filename]]@ID<-symbol
+}
+project <- addMotifAnnotations(ArchRProj = project, motifPWMs=test, name = "Motif", force=TRUE, threads=16)
+project <- addBgdPeaks(project)
+project <- addDeviationsMatrix( ArchRProj = project, peakAnnotation = "Motif", force = TRUE, threads=32)
+saveArchRProject(project)
+
+list<-list.files(path='/home/FCAM/ewentworth/cotney/analysis/scatac/mouse_palate/detailed_celltypes/PeakCalls/', pattern='Peaks.gr.rds')
+list1<-list[grep(paste(gsub(' ', '.', unique(project$Clusters)), collapse='|'), list)]
+list<-paste("/home/FCAM/ewentworth/cotney/analysis/scatac/mouse_palate/detailed_celltypes/PeakCalls/", list1, sep="")
+for (filename in list){
+val<-as.data.frame(readRDS(file=filename))
+bed<-val[,c(1,2,3,4,6,5,6,9,10,11)]
+bed[,c('Reproducibility', 'GroupReplicate', 'distToGeneStart')]<-bed$score
+list1<-gsub('/home/FCAM/ewentworth/cotney/analysis/scatac/mouse_palate/detailed_celltypes/PeakCalls/|-reproduciblePeaks.gr.rds', '', filename)
+print(filename)
+print(dim(bed))
+write.table(bed, file=paste('/home/FCAM/ewentworth/cotney/analysis/abcenhancer/palate/', list1, "_detailed_celltypes.bed", sep=''), sep='\t', quote=F, col.names=F, row.names=F)
+assign(list1, val)
+}
+
+
+
+getGroupBW(project, groupBy='Clusters', threads=1)
+saveArchRProject(project,  outputDirectory = getOutputDirectory(project),  overwrite = TRUE,  load = TRUE)
+
+
+tab1<-getGroupSE(project, useMatrix='GeneExpressionMatrix', groupBy='Clusters', scaleTo=1000000, divideN=FALSE)
+genes<-read.table(file='~/cotney/genome/hg38/ArchR_gene_coordinates_hg38.tsv', sep='\t')
+tab<-data.frame(assay(tab1))
+row.names(tab)<-rowData(tab1)$name
+tab<-tab[grep('Rik|LINC|LOC', rownames(tab), invert=TRUE), ]
+tab<-tab[which(rownames(tab) %in% genes$V4),]
+x<-as.character(colnames(tab))
+for (filename in x){
+file1<-data.frame(tab[,which(colnames(tab) %in% filename)])
+rownames(file1)<-rownames(tab)
+write.table(file1, file=paste0('~/cotney/analysis/abcenhancer/palate/', gsub(' ', '.', filename), '_detailed_celltypes_TPM.tsv'), quote=F, row.names=T, col.names=F, sep='\t')
+}
+saveArchRProject(project,  outputDirectory = getOutputDirectory(project),  overwrite = TRUE,  load = TRUE)
+
+
+markersPeaks_combined<-getMarkerFeatures(ArchRProj=project, useMatrix="PeakMatrix", groupBy="Clusters", bias=c("TSSEnrichment", "log10(nFrags)"), testMethod="wilcoxon", threads=1)
+
+library(bedr)
+load(file='/home/FCAM/ewentworth/cotney/one2one_ortho.Rdata') #stored as genesV2
+
+xxy<-unique(project$Clusters)
+#####look at motifs enriched per cluster's marker peaks
+markersPeaks<-getMarkerFeatures(ArchRProj=project, useMatrix="PeakMatrix", groupBy="Clusters", bias=c('TSSEnrichment', 'log10(nFrags)'), testMethod="ttest", threads=1)
+markerList <- getMarkers(markersPeaks, cutOff = "FDR <= 0.5 & Log2FC >= 0.05")
+
+motifsUp <- peakAnnoEnrichment(seMarker = markersPeaks, ArchRProj = project, peakAnnotation = "Motif", cutOff = "FDR <= 0.05 & Log2FC >= 0.05")
+heatmapEM <- plotEnrichHeatmap(motifsUp, n = 15, transpose = TRUE)
+pdf(file='palate_motif_enrichment_annotated_clusters.pdf', height=15, width=30)
+heatmapEM
+dev.off()
+
+markergenes<-getMarkerFeatures(ArchRProj=project, useMatrix="GeneExpressionMatrix", groupBy="Clusters", threads=1, normBy=c('Gex_nUMI', 'Gex_nGenes'), testMethod='ttest')
+markerList2 <- getMarkers(markergenes, cutOff = "FDR <= 0.05 & Log2FC >= 0.1")
+universe<-getFeatures(project)
+xxy<-unique(project$Clusters)
+
+
+osteo<-c('Sparc', 'Runx2', 'Col1a1', 'Alpl', 'Sp7')
+mpcs<-c('Tbx22', 'Wnt16', 'Meis2', 'Six2', 'Tfap2b')
+chondro<-c('Col2a1', 'Col9a2', 'Col9a3', 'Col11a1')
+perimys<-c('Rbp1', 'Igfbp5', 'Igfbp3', 'Col12a1', 'Tbx15')
+fibro<-c('Igf1', 'Fbn2', 'Prkg1', 'Col5a1', 'Col23a1')
+epi<-c('Epcam', 'Krt15', 'Krt14', 'Dsp', 'Krt5')
+endo<-c('Col15a1', 'Pecam1', 'Cdh5', 'Emcn', 'Kdr')
+neuro<-c('Stmn2', 'Mpz', 'Mbp', 'Plp1', 'S100b')
+p3<-plotEmbedding(ArchRProj=project, colorBy="cellColData", name="Clusters", embedding="UMAP_ATAC")+ theme(text = element_text(size=20), aspect.ratio=1)
+project<-addImputeWeights(project, reducedDims='LSI_Combined')
+list<-c('osteo', 'mpcs', 'chondro', 'perimys', 'fibro', 'epi', 'endo', 'neuro')
+pdf(file='annotated_markers.pdf', height=15, width=10)
+for (filename in list){
+f1<-plotGroups(ArchRProj=project, groupBy="Clusters", colorBy="GeneExpressionMatrix", name=get(filename), PlotAs="ridges", imputeWeights=getImputeWeights(project))
+print(p3 + f1 + ggtitle(filename))
+}
+dev.off()
+
+saveArchRProject(project)
+
+
+
+pal<- paletteDiscrete(values=unique(project$Sample), set='horizon', reverse=FALSE)
+
+load(file='~/cotney/one2one_ortho.Rdata') #stored as genesV2
+library(bedr)
+xxy<-unique(project$Clusters)
+universe<-getFeatures(project)
+library(ggplot2)
+library(rGREAT)
+library(DOSE)
+library(multienrichjam)
+library(clusterProfiler)
+set.seed(123)
+data3<-NULL
+for (clustername in xxy){
+data<-BiocGenerics::which(project$Clusters %in% clustername)
+data2<-project$cellNames[data]
+data<-as.data.frame(data2)
+df <- markerList2[[clustername]]
+df<-df[grep('^Gm|Rik|LINC|LOC|^Rp|^Olf', df[,5], ignore.case=TRUE, invert=TRUE),]
+df<-df[order(-df$Log2FC),5]
+value_bp <- enrichGO(gene = df, universe = universe, OrgDb = 'org.Mm.eg.db', keyType = 'SYMBOL', readable = F, ont = "BP", pvalueCutoff = 0.05, pAdjustMethod = "bonferroni")
+GO3<-simplify(value_bp, cutoff=0.75, by="qvalue")[]
+data$GO_Genes<-paste(GO3[1,2], GO3[2,2], GO3[3,2], sep=',')
+data$HighestMarker<-df[1]
+data3<-rbind(data3, data)
+}
+colnames(data3)<-c("Cells", "GO_Genes", "HighestMarker")
+cells<-data3$Cells
+data2<-project$cellNames[cells]
+project<-addCellColData(ArchRProj=project, data=data3$GO_Genes, cells=as.vector(data3$Cells), name="MarkerGenes_GO", force=TRUE)
+project<-addCellColData(ArchRProj=project, data=data3$HighestMarker, cells=as.vector(data3$Cells), name="HighestMarker", force=TRUE)
+saveArchRProject(project)
+
+
+p3<-plotEmbedding(ArchRProj=project, colorBy="cellColData", name="Clusters", embedding="UMAP_ATAC")+ theme(text = element_text(size=20), aspect.ratio=1)
+p4<-plotEmbedding(ArchRProj = project, colorBy = "cellColData", name = "Sample", embedding = "UMAP_ATAC")+ theme(text = element_text(size=20), aspect.ratio=1)
+p5<-plotEmbedding(ArchRProj = project, colorBy = "cellColData", name = "bioNames", embedding = "UMAP_ATAC")+ theme(text = element_text(size=20), aspect.ratio=1)
+m1<-plotEmbedding(ArchRProj = project, colorBy = "cellColData", name = "HighestMarker", embedding = "UMAP_ATAC") + theme(text = element_text(size=120), aspect.ratio=1)
+p9<-plotEmbedding(ArchRProj = project, colorBy = "cellColData", name = "MarkerGenes_GO", embedding = "UMAP_ATAC")+ theme(text = element_text(size=120), aspect.ratio=1)
+p10<-plotEmbedding(ArchRProj = project, colorBy = "GeneExpressionMatrix", name = "Pax9", embedding = "UMAP_ATAC")+ theme(text = element_text(size=120), aspect.ratio=1)
+p11<-plotEmbedding(ArchRProj = project, colorBy = "MotifMatrix", name = "z:PAX9", embedding = "UMAP_ATAC")+ theme(text = element_text(size=120), aspect.ratio=1)
+f1<-plotGroups(ArchRProj=project, groupBy="Clusters", colorBy="GeneExpressionMatrix", name='Pax9', PlotAs="ridges")
+f2<-plotGroups(ArchRProj=project, groupBy="Clusters", colorBy="MotifMatrix", name='z:PAX9', PlotAs="ridges")
+
+pct4<-table(project$Clusters, project$Sample)
+pct4<-as.data.frame(pct4)
+s4a<-ggplot(pct4, aes(x = Var2, y = Freq, fill = Var1)) + theme_bw(base_size = 15) + geom_col(position = "fill", width = 0.5) + xlab("Sample") +  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +  ylab("Proportion") + theme(text = element_text(size=20), aspect.ratio=1)+ theme(legend.title = element_blank()) + ggtitle('ATAC UMAP')
+s4b<-ggplot(pct4, aes(x = Var1, y = Freq, fill = Var2)) + theme_bw(base_size = 15) + geom_col(position = "fill", width = 0.5) + xlab("Sample") +  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +  ylab("Proportion") + theme(text = element_text(size=20), aspect.ratio=1)+ theme(legend.title = element_blank()) + ggtitle('ATAC UMAP')
+
+pdf(file="palate_umap_annotated.pdf", height=15, width=15)
+(p3 / p4)/(p5)
+(m1 / p9)
+(p10+p11)/(f1+f2)
+(p3|p4)/(s4a + s4b) + plot_annotation("UMAP Cluster Breakdown by Sample")
+dev.off()
+
+
+
+motif<-getFeatures(project, useMatrix='MotifMatrix')
+
+moremarkers1<-c('Sost', 'Dkk1', 'Dkk2', 'Wnt3', 'Axin2', 'Lrp5', 'Lrp6', 'Sfrp1', 'Sfrp2', 'Sfrp3', 'Lef1', 'Fzd9', 'Tcf1', 'Gsk3b', 'Wnt10b', 'Ctnnb1', 'Wnt5b', 'Wnt5a', 'Wnt1', 'Twist1', 'Twist2')
+moremarkers<-intersect(moremarkers1, getFeatures(project, useMatrix='GeneExpressionMatrix'))
+motifs<-motif[grep(paste(moremarkers1, collapse='|'), motif, ignore.case=TRUE)]
+p3<-plotEmbedding(ArchRProj=project, colorBy="cellColData", name="Clusters", embedding="UMAP_ATAC")+ theme(text = element_text(size=20), aspect.ratio=1)
+project<-addImputeWeights(project, reducedDims='LSI_Combined')
+pdf(file='annotated_extra_markers.pdf', height=15, width=10)
+for (filename in moremarkers){
+f1<-plotGroups(ArchRProj=project, groupBy="Clusters", colorBy="GeneExpressionMatrix", name=filename, PlotAs="ridges", imputeWeights=getImputeWeights(project))
+print(p3 + f1 + ggtitle(filename))
+}
+dev.off()
+
+
+project<-addFootprinting(project)
